@@ -153,6 +153,6 @@ def webhook():
 
     return jsonify({"status":"ok","new_issue":new_key}), 200
 
-@app.route("/", methods=["GET"])
+@app.route("/", methods=["POST","GET"])
 def health():
     return "OK", 200
