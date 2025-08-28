@@ -117,7 +117,7 @@ def copy_attachments_to_dest(new_issue_key, attachments):
             # log but do not fail whole request
             print(f"[warn] upload failed {a['filename']}: {up.status_code} {up.text}")
 
-@app.route("/webhook", methods=["POST"])
+@app.route("/webhook", methods=["POST", "GET"])
 def webhook():
     # Basic shared-secret gate
     if SHARED_SECRET:
