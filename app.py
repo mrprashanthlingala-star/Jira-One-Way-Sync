@@ -61,14 +61,41 @@ def find_existing_issue_by_latcha_id(latcha_key: str):
         return None
 
 def create_dest_issue(latcha_key, summary, description, due_date, latcha_created):
+    # Build description in Atlassian Document Format (ADF)
+    adf_description = {
+        "type": "doc",
+        "version": 1,
+        "content": [
+            {
+                "type": "paragraph",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": description or "No description provided."
+                    }
+                ]
+            },
+            {
+                "type": "paragraph",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"---\nOriginal ticket: https://{SRC_SITE}/browse/{latcha_key}"
+                    }
+                ]
+            }
+        ]
+    }
+
     fields = {
         "project": {"key": DEST_PROJECT},
         "issuetype": {"name": "Task"},
-        "summary": f"[Latcha {latcha_key}] {summary or ''}",
-        "description": (description or "")
-            + f"\n\n---\nOriginal ticket: https://{SRC_SITE}/browse/{latcha_key}",
+        "summary": f"[Latcha {latcha_key}] {summary or '(no summary)'}",
+        "description": adf_description,
         "labels": ["LatchaSync"]
     }
+
+    # Add optional fields if present
     if due_date:
         fields["duedate"] = due_date
     if CF_LATCHA_ID:
@@ -79,12 +106,13 @@ def create_dest_issue(latcha_key, summary, description, due_date, latcha_created
     r = requests.post(
         dest_url("/rest/api/3/issue"),
         auth=dest_auth(),
-        headers={"Accept":"application/json","Content-Type":"application/json"},
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
         json={"fields": fields}, timeout=TIMEOUT
     )
     if r.status_code not in (200, 201):
         raise RuntimeError(f"Create issue failed: {r.status_code} {r.text}")
     return r.json()["key"]
+
 
 def fetch_attachments_from_source(latcha_key):
     """Fetch attachment metadata from clictell."""
