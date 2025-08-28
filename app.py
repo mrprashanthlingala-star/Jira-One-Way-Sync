@@ -259,6 +259,9 @@ def update_dest_issue(issue_key, summary, description, due_date, latcha_created,
 
 @app.route("/webhook", methods=["POST", "GET"])
 def webhook():
+    print("Headers:", dict(request.headers))
+    print("Raw body:", request.data.decode("utf-8"))
+
     try:
         # Debug logs
         logging.debug("Headers: %s", dict(request.headers))
