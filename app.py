@@ -273,16 +273,13 @@ def webhook():
                 logging.warning("Forbidden: bad shared secret")
                 return jsonify({"error": "forbidden"}), 403
 
-        # data = request.get_json(force=True) or {}
-        # logging.debug("Parsed JSON: %s", data)
+        try:
+            data = request.get_json(force=True, silent=False)
+        except Exception as e:
+            print("JSON parse error:", e)
+            return jsonify({"error": "Invalid JSON"}), 400
 
-    try:
-        data = request.get_json(force=True, silent=False)
-        
-    except Exception as e:
-        print("JSON parse error:", e)
-        return jsonify({"error": "Invalid JSON"}), 400
-
+        logging.debug("Parsed JSON: %s", data)
 
         # Expect minimal payload from Automation
         latcha_key = data.get("key")
