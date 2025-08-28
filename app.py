@@ -12,7 +12,7 @@ app = Flask(__name__)
 DEST_SITE   = os.getenv("https://clictestdummy.atlassian.net/")           # e.g. clictestdummy.atlassian.net (NO protocol)
 DEST_EMAIL  = os.getenv("mr.prashanth.lingala@gmail.com")          # your Jira email (destination)
 DEST_TOKEN  = os.getenv("DEST_TOKEN")          # your API token (destination)
-DEST_PROJECT= os.getenv("Test Ticketing Service")        # e.g. CTD
+DEST_PROJECT= os.getenv("KAN")        # e.g. CTD
 CF_LATCHA_ID= os.getenv("Latcha Ticket ID")        # e.g. customfield_12345 (optional but recommended)
 CF_LATCHA_CREATED = os.getenv("Latcha Created Date")  # e.g. customfield_12346 (optional)
 
