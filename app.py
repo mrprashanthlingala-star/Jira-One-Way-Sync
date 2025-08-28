@@ -147,6 +147,116 @@ def copy_attachments_to_dest(new_issue_key, attachments):
             # log but do not fail whole request
             print(f"[warn] upload failed {a['filename']}: {up.status_code} {up.text}")
 
+def update_dest_issue(issue_key, summary, description, due_date, latcha_created, status, priority, attachments):
+    """Update an existing issue with new data."""
+    try:
+        # Fetch current issue details
+        r = requests.get(
+            dest_url(f"/rest/api/3/issue/{issue_key}"),
+            auth=dest_auth(), timeout=TIMEOUT
+        )
+        r.raise_for_status()
+        current_fields = r.json().get("fields", {})
+
+        # Build new fields
+        new_fields = {}
+        if summary:
+            new_fields["summary"] = f"[Latcha {issue_key}] {summary}"
+        if description:
+            # Build description in Atlassian Document Format (ADF)
+            adf_description = {
+                "type": "doc",
+                "version": 1,
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": description
+                            }
+                        ]
+                    },
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"---\nOriginal ticket: https://{SRC_SITE}/browse/{issue_key}"
+                            }
+                        ]
+                    }
+                ]
+            }
+            new_fields["description"] = adf_description
+
+        if due_date:
+            new_fields["duedate"] = due_date
+        if latcha_created:
+            new_fields[CF_LATCHA_CREATED] = latcha_created
+        if status:
+            new_fields["status"] = {"name": status}
+        if priority:
+            new_fields["priority"] = {"name": priority}
+
+        # Handle attachments
+        if attachments:
+            # Fetch existing attachments
+            r_atts = requests.get(
+                dest_url(f"/rest/api/3/issue/{issue_key}/attachments"),
+                auth=dest_auth(), timeout=TIMEOUT
+            )
+            r_atts.raise_for_status()
+            existing_attachments = r_atts.json()
+
+            # Prepare new attachments for upload
+            new_attachments_to_upload = []
+            for a in attachments:
+                if not a.get("content"):
+                    continue
+                # Check if attachment already exists
+                found = False
+                for existing_att in existing_attachments:
+                    if existing_att["filename"] == a["filename"]:
+                        found = True
+                        break
+                if not found:
+                    # stream download from source
+                    with requests.get(a["content"], auth=src_auth(), stream=True, timeout=TIMEOUT) as dl:
+                        dl.raise_for_status()
+                        file_bytes = io.BytesIO(dl.content)
+                    new_attachments_to_upload.append((a["filename"], file_bytes))
+
+            # Upload new attachments
+            if new_attachments_to_upload:
+                up_data = []
+                for filename, file_bytes in new_attachments_to_upload:
+                    up_data.append(("file", (filename, file_bytes)))
+
+                r_upload = requests.post(
+                    dest_url(f"/rest/api/3/issue/{issue_key}/attachments"),
+                    auth=dest_auth(),
+                    headers={"X-Atlassian-Token":"no-check"},
+                    files=up_data,
+                    timeout=TIMEOUT
+                )
+                if r_upload.status_code not in (200, 201):
+                    logging.warning(f"Failed to upload attachment {filename}: {r_upload.status_code} {r_upload.text}")
+
+        # Update issue
+        r_update = requests.put(
+            dest_url(f"/rest/api/3/issue/{issue_key}"),
+            auth=dest_auth(),
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            json={"fields": new_fields}, timeout=TIMEOUT
+        )
+        if r_update.status_code not in (200, 201):
+            raise RuntimeError(f"Update issue failed: {r_update.status_code} {r_update.text}")
+        logging.info(f"Updated issue {issue_key} with new data.")
+    except Exception as e:
+        logging.exception(f"Error updating issue {issue_key}: {e}")
+
+
 @app.route("/webhook", methods=["POST", "GET"])
 def webhook():
     try:
@@ -177,8 +287,9 @@ def webhook():
         # De-dup if re-sent
         existing = find_existing_issue_by_latcha_id(latcha_key)
         if existing:
-            logging.info("Issue already exists: %s", existing)
-            return jsonify({"status": "exists", "issue": existing}), 200
+            logging.info("Issue already exists: %s - updating", existing)
+            update_dest_issue(existing, summary, description, due_date, latcha_created, data.get("status"), data.get("priority"), data.get("attachments"))
+            return jsonify({"status": "updated", "issue": existing}), 200
 
         # Create mirror
         new_key = create_dest_issue(latcha_key, summary, description, due_date, latcha_created)
