@@ -124,7 +124,7 @@ def webhook():
         if request.headers.get("X-Shared-Secret") != SHARED_SECRET:
             return jsonify({"error":"forbidden"}), 403
 
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(force=True) or {}
     # Expect minimal payload from Automation
     latcha_key   = data.get("key")
     summary      = data.get("summary")
