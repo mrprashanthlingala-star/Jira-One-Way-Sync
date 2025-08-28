@@ -11,17 +11,17 @@ logging.basicConfig(level=logging.DEBUG)
 app = Flask(__name__)
 
 # ----- Dest (your Jira: clictestdummy) -----
-DEST_SITE   = os.getenv("https://clictestdummy.atlassian.net/")           # e.g. clictestdummy.atlassian.net (NO protocol)
-DEST_EMAIL  = os.getenv("mr.prashanth.lingala@gmail.com")          # your Jira email (destination)
-DEST_TOKEN  = os.getenv("DEST_TOKEN")          # your API token (destination)
-DEST_PROJECT= os.getenv("KAN")        # e.g. CTD
-CF_LATCHA_ID= os.getenv("Latcha Ticket ID")        # e.g. customfield_12345 (optional but recommended)
-CF_LATCHA_CREATED = os.getenv("Latcha Created Date")  # e.g. customfield_12346 (optional)
+DEST_SITE   = os.getenv("DEST_SITE")       # e.g. "https://clictestdummy.atlassian.net"
+DEST_EMAIL  = os.getenv("DEST_EMAIL")      # your Jira email (destination)
+DEST_TOKEN  = os.getenv("DEST_TOKEN")      # your API token (destination)
+DEST_PROJECT= os.getenv("DEST_PROJECT")    # e.g. "KAN"
+CF_LATCHA_ID= os.getenv("CF_LATCHA_ID")    # e.g. "customfield_12345" (optional)
+CF_LATCHA_CREATED = os.getenv("CF_LATCHA_CREATED")  # optional
 
 # ----- Source (client Jira: clictell) -----
-SRC_SITE    = os.getenv("https://clictell.atlassian.net/")            # e.g. clictell.atlassian.net (NO protocol)
-SRC_EMAIL   = os.getenv("prashanthkumar.l@clictechnologies.com")           # your user on clictell
-SRC_TOKEN   = os.getenv("SRC_TOKEN")           # API token for clictell
+SRC_SITE    = os.getenv("SRC_SITE")        # e.g. "https://clictell.atlassian.net"
+SRC_EMAIL   = os.getenv("SRC_EMAIL")       # your Jira email (source side)
+SRC_TOKEN   = os.getenv("SRC_TOKEN")       # your API token (source side)
 
 # ----- Security -----
 SHARED_SECRET = os.getenv("LatchaSync_2025_Secret9876")     # simple HMAC-like shared secret
