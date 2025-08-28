@@ -3,9 +3,11 @@ import io
 import json
 import time
 import requests
+import logging
 from flask import Flask, request, jsonify
 from requests.auth import HTTPBasicAuth
 
+logging.basicConfig(level=logging.DEBUG)
 app = Flask(__name__)
 
 # ----- Dest (your Jira: clictestdummy) -----
@@ -119,39 +121,55 @@ def copy_attachments_to_dest(new_issue_key, attachments):
 
 @app.route("/webhook", methods=["POST", "GET"])
 def webhook():
-    # Basic shared-secret gate
-    if SHARED_SECRET:
-        if request.headers.get("X-Shared-Secret") != SHARED_SECRET:
-            return jsonify({"error":"forbidden"}), 403
-
-    data = request.get_json(force=True) or {}
-    # Expect minimal payload from Automation
-    latcha_key   = data.get("key")
-    summary      = data.get("summary")
-    description  = data.get("description")
-    due_date     = data.get("duedate")       # e.g. "2025-08-28"
-    latcha_created = data.get("created")     # ISO-8601 (Automation provides ISO)
-
-    if not latcha_key:
-        return jsonify({"error":"missing key"}), 400
-
-    # De-dup if re-sent
-    existing = find_existing_issue_by_latcha_id(latcha_key)
-    if existing:
-        return jsonify({"status":"exists", "issue": existing}), 200
-
-    # Create mirror
-    new_key = create_dest_issue(latcha_key, summary, description, due_date, latcha_created)
-
-    # Attachments (fetched directly from source to avoid brittle templating)
     try:
-        atts = fetch_attachments_from_source(latcha_key)
-        if atts:
-            copy_attachments_to_dest(new_key, atts)
-    except Exception as e:
-        print(f"[warn] attachments failed: {e}")
+        # Debug logs
+        logging.debug("Headers: %s", dict(request.headers))
+        logging.debug("Raw body: %s", request.get_data(as_text=True))
 
-    return jsonify({"status":"ok","new_issue":new_key}), 200
+        # Basic shared-secret gate
+        if SHARED_SECRET:
+            if request.headers.get("X-Shared-Secret") != SHARED_SECRET:
+                logging.warning("Forbidden: bad shared secret")
+                return jsonify({"error": "forbidden"}), 403
+
+        data = request.get_json(force=True) or {}
+        logging.debug("Parsed JSON: %s", data)
+
+        # Expect minimal payload from Automation
+        latcha_key = data.get("key")
+        summary = data.get("summary")
+        description = data.get("description")
+        due_date = data.get("duedate")        # e.g. "2025-08-28"
+        latcha_created = data.get("created")  # ISO-8601 (Automation provides ISO)
+
+        if not latcha_key:
+            logging.error("Missing key in payload")
+            return jsonify({"error": "missing key"}), 400
+
+        # De-dup if re-sent
+        existing = find_existing_issue_by_latcha_id(latcha_key)
+        if existing:
+            logging.info("Issue already exists: %s", existing)
+            return jsonify({"status": "exists", "issue": existing}), 200
+
+        # Create mirror
+        new_key = create_dest_issue(latcha_key, summary, description, due_date, latcha_created)
+        logging.info("Created mirrored issue %s for source %s", new_key, latcha_key)
+
+        # Attachments (fetched directly from source to avoid brittle templating)
+        try:
+            atts = fetch_attachments_from_source(latcha_key)
+            if atts:
+                copy_attachments_to_dest(new_key, atts)
+                logging.info("Copied %d attachments to %s", len(atts), new_key)
+        except Exception as e:
+            logging.warning("Attachments failed for %s: %s", latcha_key, e)
+
+        return jsonify({"status": "ok", "new_issue": new_key}), 200
+
+    except Exception as e:
+        logging.exception("Webhook handler crashed")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/", methods=["POST","GET"])
 def health():
