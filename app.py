@@ -278,6 +278,7 @@ def webhook():
 
     try:
         data = request.get_json(force=True, silent=False)
+        
     except Exception as e:
         print("JSON parse error:", e)
         return jsonify({"error": "Invalid JSON"}), 400
