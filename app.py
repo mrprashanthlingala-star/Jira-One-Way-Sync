@@ -177,7 +177,10 @@ def copy_attachments_to_dest(new_issue_key, attachments):
             continue
         # stream download from source
         try:
+            # New:
+            #api_content_url = fetch_attachments_from_source(a["id"])
             with requests.get(a["content"], auth=src_auth(), stream=True, timeout=TIMEOUT) as dl:
+            #with requests.get(api_content_url, auth=src_auth(), stream=True, timeout=TIMEOUT) as dl:
                 dl.raise_for_status()
                 file_bytes = io.BytesIO(dl.content)
             logging.debug("Downloaded attachment %s from source.", a.get("filename"))
@@ -360,7 +363,7 @@ def parse_attachments_string(attachments_string):
     # Regex to find each AttachmentBean block
     bean_pattern = re.compile(r"AttachmentBean\{.*?\}")
     # Regex to find filename and content URL within an AttachmentBean block
-    detail_pattern = re.compile(r"filename='([^']+)',.*?content='([^']+)'")
+    detail_pattern = re.compile(r"id=(\d+), filename='([^']+)',.*?content='([^']+)'")
     
     parsed_attachments = []
     for bean_match in bean_pattern.finditer(attachments_string):
