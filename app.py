@@ -172,39 +172,46 @@ def copy_attachments_to_dest(new_issue_key, attachments):
     logging.debug("Entering copy_attachments_to_dest for issue %s with %d attachments.", new_issue_key, len(attachments))
 
     for a in attachments:
-        filename = a.get("filename")
-        content_url = a.get("content")
-
+        filename = a.get("filename") or "file"
         logging.debug("Processing attachment: %s", filename)
-        if not content_url:
+
+        if not a.get("content"):
             logging.warning("Attachment %s has no content URL, skipping.", filename)
             continue
 
-        # --- Download from source ---
+        # stream download from source
         try:
-            with requests.get(content_url, auth=src_auth(), stream=True, timeout=TIMEOUT) as dl:
+            with requests.get(a["content"], auth=src_auth(), stream=True, timeout=TIMEOUT) as dl:
                 dl.raise_for_status()
-                file_bytes = io.BytesIO(dl.content)  # copy file into memory
-            logging.debug("Downloaded attachment %s from source.", filename)
+                file_bytes = io.BytesIO(dl.content)
+            logging.debug("Downloaded attachment %s (%d bytes) from source.", filename, len(file_bytes.getvalue()))
         except Exception as e:
-            logging.warning(f"Failed to download attachment {filename} from source: {e}", exc_info=True)
+            logging.warning("Failed to download attachment %s from source: %s", filename, e, exc_info=True)
             continue
 
-        # --- Upload to destination ---
+        # upload to dest
         try:
+            upload_url = dest_url(f"/rest/api/3/issue/{new_issue_key}/attachments")
+            logging.debug("Uploading attachment %s to %s", filename, upload_url)
+
             up = requests.post(
-                dest_url(f"/rest/api/3/issue/{new_issue_key}/attachments"),
+                upload_url,
                 auth=dest_auth(),
                 headers={"X-Atlassian-Token": "no-check"},
-                files={"file": (filename or "file", file_bytes)},
+                files={"file": (filename, file_bytes)},
                 timeout=TIMEOUT
             )
+
+            # log full response for debugging
+            logging.debug("Upload response for %s: %s %s", filename, up.status_code, up.text[:500])
+
             if up.status_code not in (200, 201):
-                logging.warning(f"Upload failed for {filename}: {up.status_code} {up.text}")
+                logging.warning("Upload failed for %s: %s %s", filename, up.status_code, up.text)
             else:
                 logging.debug("Successfully uploaded attachment %s to %s.", filename, new_issue_key)
+
         except Exception as e:
-            logging.warning(f"Failed to upload attachment {filename} to destination: {e}", exc_info=True)
+            logging.warning("Failed to upload attachment %s to destination: %s", filename, e, exc_info=True)
 
     logging.debug("Exiting copy_attachments_to_dest for issue %s.", new_issue_key)
 
