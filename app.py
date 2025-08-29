@@ -60,7 +60,7 @@ def find_existing_issue_by_latcha_id(latcha_key: str):
     except Exception:
         return None
 
-def create_dest_issue(latcha_key, summary, description, due_date, latcha_created, status, priority):
+def create_dest_issue(latcha_key, summary, description, due_date, latcha_created, priority):
     # Build description in Atlassian Document Format (ADF)
     adf_description = {
         "type": "doc",
@@ -102,8 +102,6 @@ def create_dest_issue(latcha_key, summary, description, due_date, latcha_created
         fields[CF_LATCHA_ID] = latcha_key
     if CF_LATCHA_CREATED and latcha_created:
         fields[CF_LATCHA_CREATED] = latcha_created  # must be ISO-8601
-    if status:
-        fields["status"] = {"name": status}
     if priority:
         fields["priority"] = {"name": priority}
 
@@ -120,20 +118,24 @@ def create_dest_issue(latcha_key, summary, description, due_date, latcha_created
 
 def fetch_attachments_from_source(latcha_key):
     """Fetch attachment metadata from clictell."""
+    logging.debug("Fetching attachments for %s", latcha_key)
     r = requests.get(
-        src_url(f"/rest/api/3/issue/{latcha_key}"),
-        params={"fields":"attachment"},
+        src_url(f"/rest/api/3/issue/{latcha_key}?fields=attachment"),
         auth=src_auth(), timeout=TIMEOUT
     )
     r.raise_for_status()
-    fields = r.json().get("fields", {}) or {}
-    atts = fields.get("attachment") or []
+    atts = r.json()["fields"]["attachment"]
+
+    # Ensure content URL is absolute for download
+    for a in atts:
+        a["content"] = src_url(a["content"])
+
     return [{"filename": a.get("filename"), "content": a.get("content")} for a in atts]
 
 def copy_attachments_to_dest(new_issue_key, attachments):
     """Download each attachment from clictell and upload to clictestdummy."""
     for a in attachments:
-        if not a.get("content"): 
+        if not a.get("content"):
             continue
         # stream download from source
         with requests.get(a["content"], auth=src_auth(), stream=True, timeout=TIMEOUT) as dl:
@@ -337,8 +339,45 @@ def webhook():
             return jsonify({"status": "updated", "issue": existing}), 200
 
         # Create mirror
-        new_key = create_dest_issue(latcha_key, summary, description, due_date, latcha_created, data.get("status"), data.get("priority"))
+        new_key = create_dest_issue(latcha_key, summary, description, due_date, latcha_created, data.get("priority"))
         logging.info("Created mirrored issue %s for source %s", new_key, latcha_key)
+
+        # After creation, if a specific status was requested, attempt to transition to it.
+        if data.get("status"):
+            issue_key = new_key # for status transition
+            status = data.get("status")
+            try:
+                transitions_resp = requests.get(
+                    dest_url(f"/rest/api/3/issue/{issue_key}/transitions"),
+                    auth=dest_auth(), timeout=TIMEOUT
+                )
+                transitions_resp.raise_for_status()
+                transitions = transitions_resp.json().get("transitions", [])
+
+                transition_id = None
+                for t in transitions:
+                    if t["name"].lower() == status.lower():
+                        transition_id = t["id"]
+                        break
+
+                if transition_id:
+                    transition_resp = requests.post(
+                        dest_url(f"/rest/api/3/issue/{issue_key}/transitions"),
+                        auth=dest_auth(),
+                        headers={"Accept": "application/json", "Content-Type": "application/json"},
+                        json={
+                            "transition": {
+                                "id": transition_id
+                            }
+                        },
+                        timeout=TIMEOUT
+                    )
+                    transition_resp.raise_for_status()
+                    logging.info(f"Transitioned newly created issue {issue_key} to status {status}")
+                else:
+                    logging.warning(f"No transition found for status {status} for newly created issue {issue_key}")
+            except Exception as e:
+                logging.warning(f"Failed to transition status for newly created issue {issue_key}: {e}")
 
         # Attachments (fetched directly from source to avoid brittle templating)
         try:
