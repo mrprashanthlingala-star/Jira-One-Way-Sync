@@ -60,7 +60,7 @@ def find_existing_issue_by_latcha_id(latcha_key: str):
     except Exception:
         return None
 
-def create_dest_issue(latcha_key, summary, description, due_date, latcha_created):
+def create_dest_issue(latcha_key, summary, description, due_date, latcha_created, status, priority):
     # Build description in Atlassian Document Format (ADF)
     adf_description = {
         "type": "doc",
@@ -102,6 +102,10 @@ def create_dest_issue(latcha_key, summary, description, due_date, latcha_created
         fields[CF_LATCHA_ID] = latcha_key
     if CF_LATCHA_CREATED and latcha_created:
         fields[CF_LATCHA_CREATED] = latcha_created  # must be ISO-8601
+    if status:
+        fields["status"] = {"name": status}
+    if priority:
+        fields["priority"] = {"name": priority}
 
     r = requests.post(
         dest_url("/rest/api/3/issue"),
@@ -194,8 +198,41 @@ def update_dest_issue(issue_key, summary, description, due_date, latcha_created,
             new_fields["duedate"] = due_date
         if latcha_created:
             new_fields[CF_LATCHA_CREATED] = latcha_created
-        if status:
-            new_fields["status"] = {"name": status}
+        if status and current_fields.get("status", {}).get("name") != status:
+            # Handle status transition
+            try:
+                transitions_resp = requests.get(
+                    dest_url(f"/rest/api/3/issue/{issue_key}/transitions"),
+                    auth=dest_auth(), timeout=TIMEOUT
+                )
+                transitions_resp.raise_for_status()
+                transitions = transitions_resp.json().get("transitions", [])
+
+                transition_id = None
+                for t in transitions:
+                    if t["name"].lower() == status.lower():
+                        transition_id = t["id"]
+                        break
+
+                if transition_id:
+                    transition_resp = requests.post(
+                        dest_url(f"/rest/api/3/issue/{issue_key}/transitions"),
+                        auth=dest_auth(),
+                        headers={"Accept": "application/json", "Content-Type": "application/json"},
+                        json={
+                            "transition": {
+                                "id": transition_id
+                            }
+                        },
+                        timeout=TIMEOUT
+                    )
+                    transition_resp.raise_for_status()
+                    logging.info(f"Transitioned issue {issue_key} to status {status}")
+                else:
+                    logging.warning(f"No transition found for status {status} in issue {issue_key}")
+            except Exception as e:
+                logging.warning(f"Failed to transition status for issue {issue_key}: {e}")
+
         if priority:
             new_fields["priority"] = {"name": priority}
 
@@ -300,7 +337,7 @@ def webhook():
             return jsonify({"status": "updated", "issue": existing}), 200
 
         # Create mirror
-        new_key = create_dest_issue(latcha_key, summary, description, due_date, latcha_created)
+        new_key = create_dest_issue(latcha_key, summary, description, due_date, latcha_created, data.get("status"), data.get("priority"))
         logging.info("Created mirrored issue %s for source %s", new_key, latcha_key)
 
         # Attachments (fetched directly from source to avoid brittle templating)
