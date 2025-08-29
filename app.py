@@ -27,6 +27,26 @@ SRC_TOKEN   = os.getenv("SRC_TOKEN")       # your API token (source side)
 SHARED_SECRET = os.getenv("LatchaSync_2025_Secret9876")     # simple HMAC-like shared secret
 TIMEOUT = 40
 
+PRIORITY_MAP = {}
+
+def get_priority_name(priority_id):
+    global PRIORITY_MAP
+    if not PRIORITY_MAP:
+        try:
+            r = requests.get(
+                dest_url("/rest/api/3/priority"),
+                auth=dest_auth(), timeout=TIMEOUT
+            )
+            r.raise_for_status()
+            priorities = r.json()
+            for p in priorities:
+                PRIORITY_MAP[p["id"]] = p["name"]
+        except Exception as e:
+            logging.error(f"Failed to fetch priorities: {e}")
+            return None
+
+    return PRIORITY_MAP.get(str(priority_id))
+
 def dest_auth():
     return HTTPBasicAuth(DEST_EMAIL, DEST_TOKEN)
 
@@ -103,7 +123,11 @@ def create_dest_issue(latcha_key, summary, description, due_date, latcha_created
     if CF_LATCHA_CREATED and latcha_created:
         fields[CF_LATCHA_CREATED] = latcha_created  # must be ISO-8601
     if priority:
-        fields["priority"] = {"name": priority}
+        priority_name = get_priority_name(priority)
+        if priority_name:
+            fields["priority"] = {"name": priority_name}
+        else:
+            logging.warning(f"Could not map priority ID {priority} to a name.")
 
     r = requests.post(
         dest_url("/rest/api/3/issue"),
@@ -236,7 +260,11 @@ def update_dest_issue(issue_key, summary, description, due_date, latcha_created,
                 logging.warning(f"Failed to transition status for issue {issue_key}: {e}")
 
         if priority:
-            new_fields["priority"] = {"name": priority}
+            priority_name = get_priority_name(priority)
+            if priority_name:
+                new_fields["priority"] = {"name": priority_name}
+            else:
+                logging.warning(f"Could not map priority ID {priority} to a name during update.")
 
         # Handle attachments
         if attachments:
