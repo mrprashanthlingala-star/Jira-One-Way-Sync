@@ -1,129 +1,99 @@
 import os
 import io
+import json
 import requests
 import logging
 from flask import Flask, request, jsonify
 from requests.auth import HTTPBasicAuth
-import re
 
 logging.basicConfig(level=logging.DEBUG)
 app = Flask(__name__)
 
 # ----- Dest (your Jira: clictestdummy) -----
-DEST_SITE   = os.getenv("DEST_SITE")       # e.g. "clictestdummy.atlassian.net"
-DEST_EMAIL  = os.getenv("DEST_EMAIL")      
-DEST_TOKEN  = os.getenv("DEST_TOKEN")      
-DEST_PROJECT= os.getenv("DEST_PROJECT")    
-CF_LATCHA_ID= os.getenv("CF_LATCHA_ID")    
-CF_LATCHA_CREATED = os.getenv("CF_LATCHA_CREATED")
+DEST_SITE   = os.getenv("DEST_SITE")        # e.g. "clictestdummy.atlassian.net" (NO scheme)
+DEST_EMAIL  = os.getenv("DEST_EMAIL")       # your Jira email (destination)
+DEST_TOKEN  = os.getenv("DEST_TOKEN")       # your API token (destination)
+DEST_PROJECT= os.getenv("DEST_PROJECT")     # e.g. "KAN"
+CF_LATCHA_ID= os.getenv("CF_LATCHA_ID")     # e.g. "customfield_12345" (optional)
+CF_LATCHA_CREATED = os.getenv("CF_LATCHA_CREATED")  # optional
 
 # ----- Source (client Jira: clictell) -----
-SRC_SITE    = os.getenv("SRC_SITE")        
-SRC_EMAIL   = os.getenv("SRC_EMAIL")       
-SRC_TOKEN   = os.getenv("SRC_TOKEN")       
+SRC_SITE    = os.getenv("SRC_SITE")         # e.g. "clictell.atlassian.net" (NO scheme)
+SRC_EMAIL   = os.getenv("SRC_EMAIL")        # your Jira email (source side)
+SRC_TOKEN   = os.getenv("SRC_TOKEN")        # your API token (source side)
 
 # ----- Security -----
-SHARED_SECRET = os.getenv("SHARED_SECRET")   # fixed
+# You previously used the secret's literal text as the *env var name*. Keep that,
+# but also allow a normal SHARED_SECRET env var as a fallback.
+SHARED_SECRET = os.getenv("LatchaSync_2025_Secret9876") or os.getenv("SHARED_SECRET")
 TIMEOUT = 40
 
-PRIORITY_MAP = {}
+def _host(h: str) -> str:
+    """Ensure we only have the host (no scheme)."""
+    if not h:
+        return ""
+    return h.replace("https://", "").replace("http://", "").strip().strip("/")
 
-# ----------------- Helpers -----------------
+DEST_SITE = _host(DEST_SITE)
+SRC_SITE  = _host(SRC_SITE)
+
 def dest_auth():
     return HTTPBasicAuth(DEST_EMAIL, DEST_TOKEN)
 
 def src_auth():
     return HTTPBasicAuth(SRC_EMAIL, SRC_TOKEN)
 
-def dest_url(path):
+def dest_url(path: str) -> str:
     return f"https://{DEST_SITE}{path}"
 
-def src_url(path):
+def src_url(path: str) -> str:
     return f"https://{SRC_SITE}{path}"
 
 def jql_escape(val: str) -> str:
-    return val.replace('"', '\\"')
+    return (val or "").replace('"', '\\"')
 
-# ----------------- Priority -----------------
-def get_priority_name(priority_id):
-    global PRIORITY_MAP
-    if not PRIORITY_MAP:
-        try:
-            r = requests.get(dest_url("/rest/api/3/priority"), auth=dest_auth(), timeout=TIMEOUT)
-            r.raise_for_status()
-            for p in r.json():
-                PRIORITY_MAP[p["id"]] = p["name"]
-        except Exception as e:
-            logging.error(f"Failed to fetch priorities: {e}")
-            return None
-    return PRIORITY_MAP.get(str(priority_id))
-
-# ----------------- Attachments -----------------
-def fetch_attachments_from_source(issue_key):
-    """Fetch attachment metadata cleanly from source Jira."""
-    logging.debug("Fetching attachments for %s", issue_key)
-    r = requests.get(
-        src_url(f"/rest/api/3/issue/{issue_key}?fields=attachment"),
-        auth=src_auth(), timeout=TIMEOUT
-    )
-    r.raise_for_status()
-    atts = r.json().get("fields", {}).get("attachment", [])
-    return [{"id": a["id"], "filename": a["filename"], "content": a["content"]} for a in atts]
-
-def copy_attachments_to_dest(new_issue_key, attachments):
-    """Download each attachment from source Jira and upload to destination Jira."""
-    logging.debug("Copying %d attachments to %s", len(attachments), new_issue_key)
-
-    for a in attachments:
-        filename = a.get("filename") or "file"
-        content_url = a.get("content")
-        if not content_url:
-            continue
-
-        try:
-            with requests.get(content_url, auth=src_auth(), stream=True, timeout=TIMEOUT) as dl:
-                dl.raise_for_status()
-                file_bytes = io.BytesIO(dl.content)
-        except Exception as e:
-            logging.warning("Failed to download %s: %s", filename, e)
-            continue
-
-        try:
-            up = requests.post(
-                dest_url(f"/rest/api/3/issue/{new_issue_key}/attachments"),
-                auth=dest_auth(),
-                headers={"X-Atlassian-Token": "no-check"},
-                files={"file": (filename, file_bytes)},
-                timeout=TIMEOUT
-            )
-            if up.status_code not in (200, 201):
-                logging.warning("Upload failed for %s: %s %s", filename, up.status_code, up.text)
-        except Exception as e:
-            logging.warning("Failed to upload %s: %s", filename, e)
-
-# ----------------- Issue Handling -----------------
 def find_existing_issue_by_latcha_id(latcha_key: str):
+    """Optional de-dup: if CF_LATCHA_ID is set, search by it; else search by summary prefix."""
     try:
         if CF_LATCHA_ID:
             jql = f'project = "{DEST_PROJECT}" AND "{CF_LATCHA_ID}" ~ "{jql_escape(latcha_key)}"'
         else:
             jql = f'project = "{DEST_PROJECT}" AND summary ~ "[Latcha {jql_escape(latcha_key)}]"'
-        r = requests.get(dest_url("/rest/api/3/search"),
-                         params={"jql": jql, "maxResults": 1, "fields": "key"},
-                         auth=dest_auth(), timeout=TIMEOUT)
+        r = requests.get(
+            dest_url("/rest/api/3/search"),
+            params={"jql": jql, "maxResults": 1, "fields": "key"},
+            auth=dest_auth(), timeout=TIMEOUT
+        )
         r.raise_for_status()
-        issues = r.json().get("issues", [])
+        issues = r.json().get("issues", []) or []
         return issues[0]["key"] if issues else None
     except Exception:
         return None
 
-def create_dest_issue(latcha_key, summary, description, due_date, latcha_created, priority, attachments):
+def create_dest_issue(latcha_key, summary, description, due_date, latcha_created):
+    # Build description in Atlassian Document Format (ADF)
     adf_description = {
         "type": "doc",
         "version": 1,
         "content": [
-            {"type": "paragraph", "content": [{"type": "text", "text": description or "No description"}]},
-            {"type": "paragraph", "content": [{"type": "text", "text": f"---\nOriginal ticket: https://{SRC_SITE}/browse/{latcha_key}"}]}
+            {
+                "type": "paragraph",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": description or "No description provided."
+                    }
+                ]
+            },
+            {
+                "type": "paragraph",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"---\nOriginal ticket: https://{SRC_SITE}/browse/{latcha_key}"
+                    }
+                ]
+            }
         ]
     }
 
@@ -134,98 +104,134 @@ def create_dest_issue(latcha_key, summary, description, due_date, latcha_created
         "description": adf_description,
         "labels": ["LatchaSync"]
     }
+
+    # Add optional fields if present
     if due_date:
         fields["duedate"] = due_date
     if CF_LATCHA_ID:
         fields[CF_LATCHA_ID] = latcha_key
     if CF_LATCHA_CREATED and latcha_created:
-        fields[CF_LATCHA_CREATED] = latcha_created
-    if priority:
-        pname = get_priority_name(priority)
-        if pname:
-            fields["priority"] = {"name": pname}
+        fields[CF_LATCHA_CREATED] = latcha_created  # must be ISO-8601
 
-    r = requests.post(dest_url("/rest/api/3/issue"),
-                      auth=dest_auth(),
-                      headers={"Accept": "application/json", "Content-Type": "application/json"},
-                      json={"fields": fields}, timeout=TIMEOUT)
+    r = requests.post(
+        dest_url("/rest/api/3/issue"),
+        auth=dest_auth(),
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        json={"fields": fields}, timeout=TIMEOUT
+    )
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"Create issue failed: {r.status_code} {r.text}")
+    return r.json()["key"]
+
+def fetch_attachments_from_source(latcha_key):
+    """Fetch attachment metadata from clictell."""
+    r = requests.get(
+        src_url(f"/rest/api/3/issue/{latcha_key}"),
+        params={"fields": "attachment"},
+        auth=src_auth(), timeout=TIMEOUT
+    )
     r.raise_for_status()
-    new_key = r.json()["key"]
+    fields = r.json().get("fields", {}) or {}
+    atts = fields.get("attachment") or []
+    # Jira Cloud provides absolute content URLs already.
+    return [{"filename": a.get("filename"), "content": a.get("content")} for a in atts]
 
-    if attachments:
-        copy_attachments_to_dest(new_key, attachments)
+def copy_attachments_to_dest(new_issue_key, attachments):
+    """Download each attachment from clictell and upload to clictestdummy."""
+    for a in attachments:
+        content_url = a.get("content")
+        filename = a.get("filename") or "file"
+        if not content_url:
+            continue
 
-    return new_key
+        # Download from source
+        with requests.get(content_url, auth=src_auth(), stream=True, timeout=TIMEOUT) as dl:
+            dl.raise_for_status()
+            file_bytes = io.BytesIO(dl.content)
 
-def update_dest_issue(issue_key, summary, description, due_date, latcha_created, status, priority, attachments):
-    new_fields = {}
-    if summary:
-        new_fields["summary"] = summary
-    if description:
-        new_fields["description"] = {
-            "type": "doc",
-            "version": 1,
-            "content": [
-                {"type": "paragraph", "content": [{"type": "text", "text": description}]},
-                {"type": "paragraph", "content": [{"type": "text", "text": f"---\nOriginal: https://{SRC_SITE}/browse/{issue_key}"}]}
-            ]
-        }
-    if due_date:
-        new_fields["duedate"] = due_date
-    if latcha_created:
-        new_fields[CF_LATCHA_CREATED] = latcha_created
-    if priority:
-        pname = get_priority_name(priority)
-        if pname:
-            new_fields["priority"] = {"name": pname}
+        # Upload to destination
+        up = requests.post(
+            dest_url(f"/rest/api/3/issue/{new_issue_key}/attachments"),
+            auth=dest_auth(),
+            headers={"X-Atlassian-Token": "no-check"},
+            files={"file": (filename, file_bytes)},
+            timeout=TIMEOUT
+        )
+        if up.status_code not in (200, 201):
+            # Log but don't fail the whole request
+            logging.warning("[warn] upload failed %s: %s %s", filename, up.status_code, up.text)
 
-    if new_fields:
-        requests.put(dest_url(f"/rest/api/3/issue/{issue_key}"),
-                     auth=dest_auth(),
-                     headers={"Accept": "application/json", "Content-Type": "application/json"},
-                     json={"fields": new_fields}, timeout=TIMEOUT)
+def _get_shared_secret_from_request(req) -> str:
+    """Pull secret from header or query param; header name tolerant to case."""
+    # Header (preferred)
+    for k, v in req.headers.items():
+        if k.lower() == "x-shared-secret":
+            return v
+    # Fallback: query param ?secret=...
+    return req.args.get("secret")
 
-    # Status transition
-    if status:
-        transitions = requests.get(dest_url(f"/rest/api/3/issue/{issue_key}/transitions"),
-                                   auth=dest_auth(), timeout=TIMEOUT).json().get("transitions", [])
-        tid = next((t["id"] for t in transitions if t["name"].lower() == status.lower()), None)
-        if tid:
-            requests.post(dest_url(f"/rest/api/3/issue/{issue_key}/transitions"),
-                          auth=dest_auth(),
-                          headers={"Content-Type": "application/json"},
-                          json={"transition": {"id": tid}}, timeout=TIMEOUT)
-
-    if attachments:
-        copy_attachments_to_dest(issue_key, attachments)
-
-# ----------------- Webhook -----------------
-@app.route("/webhook", methods=["POST"])
+@app.route("/webhook", methods=["POST", "GET"])
 def webhook():
-    if SHARED_SECRET and request.headers.get("X-Shared-Secret") != SHARED_SECRET:
-        return jsonify({"error": "forbidden"}), 403
+    try:
+        # Debug logs
+        logging.debug("Headers: %s", dict(request.headers))
+        logging.debug("Raw body: %s", request.get_data(as_text=True))
 
-    data = request.get_json(force=True)
-    latcha_key = data.get("key")
-    summary = data.get("summary")
-    description = data.get("description")
-    due_date = data.get("duedate")
-    latcha_created = data.get("created")
-    priority = data.get("priority")
-    status = data.get("status")
+        # Basic shared-secret gate (only if configured)
+        if SHARED_SECRET:
+            incoming_secret = _get_shared_secret_from_request(request)
+            if incoming_secret != SHARED_SECRET:
+                logging.warning("Forbidden: bad shared secret (got %r)", incoming_secret)
+                return jsonify({"error": "forbidden"}), 403
 
-    # Always fetch attachments fresh from source
-    attachments = fetch_attachments_from_source(latcha_key)
+        # Be tolerant: try Flask JSON first, then manual parse
+        data = request.get_json(silent=True)
+        if data is None:
+            raw = request.get_data(as_text=True) or ""
+            try:
+                data = json.loads(raw) if raw else {}
+            except Exception:
+                logging.error("Invalid JSON body")
+                return jsonify({"error": "Invalid JSON"}), 400
 
-    existing = find_existing_issue_by_latcha_id(latcha_key)
-    if existing:
-        update_dest_issue(existing, summary, description, due_date, latcha_created, status, priority, attachments)
-        return jsonify({"status": "updated", "issue": existing})
-    else:
-        new_key = create_dest_issue(latcha_key, summary, description, due_date, latcha_created, priority, attachments)
-        update_dest_issue(new_key, None, None, None, None, status, None, None)
-        return jsonify({"status": "created", "issue": new_key})
+        logging.debug("Parsed JSON: %s", data)
 
-@app.route("/", methods=["GET"])
+        # Expect minimal payload from Automation
+        latcha_key = data.get("key")
+        summary = data.get("summary")
+        description = data.get("description")
+        due_date = data.get("duedate")        # e.g. "2025-08-28"
+        latcha_created = data.get("created")  # ISO-8601 (Automation provides ISO)
+
+        if not latcha_key:
+            logging.error("Missing key in payload")
+            return jsonify({"error": "missing key"}), 400
+
+        # De-dup if re-sent
+        existing = find_existing_issue_by_latcha_id(latcha_key)
+        if existing:
+            logging.info("Issue already exists: %s", existing)
+            return jsonify({"status": "exists", "issue": existing}), 200
+
+        # Create mirror
+        new_key = create_dest_issue(latcha_key, summary, description, due_date, latcha_created)
+        logging.info("Created mirrored issue %s for source %s", new_key, latcha_key)
+
+        # Attachments (fetched directly from source to avoid brittle templating)
+        try:
+            atts = fetch_attachments_from_source(latcha_key)
+            if atts:
+                copy_attachments_to_dest(new_key, atts)
+                logging.info("Copied %d attachments to %s", len(atts), new_key)
+        except Exception as e:
+            logging.warning("Attachments failed for %s: %s", latcha_key, e)
+
+        return jsonify({"status": "ok", "new_issue": new_key}), 200
+
+    except Exception as e:
+        logging.exception("Webhook handler crashed")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/", methods=["POST","GET"])
 def health():
     return "OK", 200
