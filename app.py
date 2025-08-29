@@ -151,21 +151,26 @@ def create_dest_issue(latcha_key, summary, description, due_date, latcha_created
     return new_issue_key
 
 
-def fetch_attachments_from_source(latcha_key):
-    """Fetch attachment metadata from clictell."""
-    logging.debug("Fetching attachments for %s", latcha_key)
+def fetch_attachments_from_source(issue_key):
+    """Fetch attachment metadata from source Jira issue."""
+    logging.debug("Fetching attachments for %s", issue_key)
     r = requests.get(
-        src_url(f"/rest/api/3/issue/{latcha_key}?fields=attachment"),
+        src_url(f"/rest/api/3/issue/{issue_key}?fields=attachment"),
         auth=src_auth(), timeout=TIMEOUT
     )
     r.raise_for_status()
-    atts = r.json()["fields"]["attachment"]
+    atts = r.json().get("fields", {}).get("attachment", [])
 
-    # Ensure content URL is absolute for download
+    attachments = []
     for a in atts:
-        a["content"] = src_url(a["content"])
+        attachments.append({
+            "id": a.get("id"),
+            "filename": a.get("filename"),
+            "content": a.get("content")  # already an absolute URL
+        })
 
-    return [{"filename": a.get("filename"), "content": a.get("content")} for a in atts]
+    logging.debug("Fetched %d attachments from %s", len(attachments), issue_key)
+    return attachments
 
 def copy_attachments_to_dest(new_issue_key, attachments):
     """Download each attachment from source Jira and upload to destination Jira."""
