@@ -168,44 +168,46 @@ def fetch_attachments_from_source(latcha_key):
     return [{"filename": a.get("filename"), "content": a.get("content")} for a in atts]
 
 def copy_attachments_to_dest(new_issue_key, attachments):
-    """Download each attachment from clictell and upload to clictestdummy."""
+    """Download each attachment from source Jira and upload to destination Jira."""
     logging.debug("Entering copy_attachments_to_dest for issue %s with %d attachments.", new_issue_key, len(attachments))
+
     for a in attachments:
-        logging.debug("Processing attachment: %s", a.get("filename"))
-        if not a.get("content"):
-            logging.warning("Attachment %s has no content URL, skipping.", a.get("filename"))
-            continue
-        # stream download from source
-        try:
-            # New:
-            #api_content_url = fetch_attachments_from_source(a["id"])
-            with requests.get(a["content"], auth=src_auth(), stream=True, timeout=TIMEOUT) as dl:
-            #with requests.get(api_content_url, auth=src_auth(), stream=True, timeout=TIMEOUT) as dl:
-                dl.raise_for_status()
-                file_bytes = io.BytesIO(dl.content)
-            logging.debug("Downloaded attachment %s from source.", a.get("filename"))
-        except Exception as e:
-            logging.warning(f"Failed to download attachment {a.get("filename")} from source: {e}", exc_info=True)
+        filename = a.get("filename")
+        content_url = a.get("content")
+
+        logging.debug("Processing attachment: %s", filename)
+        if not content_url:
+            logging.warning("Attachment %s has no content URL, skipping.", filename)
             continue
 
-        # upload to dest
+        # --- Download from source ---
+        try:
+            with requests.get(content_url, auth=src_auth(), stream=True, timeout=TIMEOUT) as dl:
+                dl.raise_for_status()
+                file_bytes = io.BytesIO(dl.content)  # copy file into memory
+            logging.debug("Downloaded attachment %s from source.", filename)
+        except Exception as e:
+            logging.warning(f"Failed to download attachment {filename} from source: {e}", exc_info=True)
+            continue
+
+        # --- Upload to destination ---
         try:
             up = requests.post(
                 dest_url(f"/rest/api/3/issue/{new_issue_key}/attachments"),
                 auth=dest_auth(),
-                headers={"X-Atlassian-Token":"no-check"},
-                files={"file": (a["filename"] or "file", file_bytes)},
+                headers={"X-Atlassian-Token": "no-check"},
+                files={"file": (filename or "file", file_bytes)},
                 timeout=TIMEOUT
             )
             if up.status_code not in (200, 201):
-                # log but do not fail whole request
-                logging.warning(f"Upload failed for {a["filename"]}: {up.status_code} {up.text}")
+                logging.warning(f"Upload failed for {filename}: {up.status_code} {up.text}")
             else:
-                logging.debug("Successfully uploaded attachment %s to %s.", a["filename"], new_issue_key)
+                logging.debug("Successfully uploaded attachment %s to %s.", filename, new_issue_key)
         except Exception as e:
-            logging.warning(f"Failed to upload attachment {a.get("filename")} to destination: {e}", exc_info=True)
+            logging.warning(f"Failed to upload attachment {filename} to destination: {e}", exc_info=True)
 
     logging.debug("Exiting copy_attachments_to_dest for issue %s.", new_issue_key)
+
 
 def update_dest_issue(issue_key, summary, description, due_date, latcha_created, status, priority, attachments):
     """Update an existing issue with new data."""
