@@ -6,6 +6,7 @@ import requests
 import logging
 from flask import Flask, request, jsonify
 from requests.auth import HTTPBasicAuth
+import re
 
 logging.basicConfig(level=logging.DEBUG)
 app = Flask(__name__)
@@ -80,7 +81,7 @@ def find_existing_issue_by_latcha_id(latcha_key: str):
     except Exception:
         return None
 
-def create_dest_issue(latcha_key, summary, description, due_date, latcha_created, priority):
+def create_dest_issue(latcha_key, summary, description, due_date, latcha_created, priority, attachments):
     # Build description in Atlassian Document Format (ADF)
     adf_description = {
         "type": "doc",
@@ -137,7 +138,17 @@ def create_dest_issue(latcha_key, summary, description, due_date, latcha_created
     )
     if r.status_code not in (200, 201):
         raise RuntimeError(f"Create issue failed: {r.status_code} {r.text}")
-    return r.json()["key"]
+    new_issue_key = r.json()["key"]
+
+    # Handle attachments for newly created issue
+    if attachments:
+        try:
+            copy_attachments_to_dest(new_issue_key, attachments)
+            logging.info("Copied %d attachments to %s", len(attachments), new_issue_key)
+        except Exception as e:
+            logging.warning("Attachments failed for %s: %s", new_issue_key, e)
+
+    return new_issue_key
 
 
 def fetch_attachments_from_source(latcha_key):
@@ -324,6 +335,27 @@ def update_dest_issue(issue_key, summary, description, due_date, latcha_created,
         logging.exception(f"Error updating issue {issue_key}: {e}")
 
 
+def parse_attachments_string(attachments_string):
+    if not attachments_string: # Handle empty string or None
+        return []
+    
+    # Regex to find each AttachmentBean block
+    bean_pattern = re.compile(r"AttachmentBean\{.*?\}")
+    # Regex to find filename and content URL within an AttachmentBean block
+    detail_pattern = re.compile(r"filename='([^']+)',.*?content='([^']+)'")
+    
+    parsed_attachments = []
+    for bean_match in bean_pattern.finditer(attachments_string):
+        bean_block = bean_match.group(0)
+        detail_match = detail_pattern.search(bean_block)
+        if detail_match:
+            filename = detail_match.group(1)
+            content_url = detail_match.group(2)
+            parsed_attachments.append({"filename": filename, "content": content_url})
+        
+    return parsed_attachments
+
+
 @app.route("/webhook", methods=["POST", "GET"])
 def webhook():
     print("Headers:", dict(request.headers))
@@ -354,6 +386,10 @@ def webhook():
         description = data.get("description")
         due_date = data.get("duedate")        # e.g. "2025-08-28"
         latcha_created = data.get("created")  # ISO-8601 (Automation provides ISO)
+        priority = data.get("priority")
+        status = data.get("status")
+        attachments_string = data.get("attachments")
+        parsed_attachments = parse_attachments_string(attachments_string)
 
         if not latcha_key:
             logging.error("Missing key in payload")
@@ -363,17 +399,16 @@ def webhook():
         existing = find_existing_issue_by_latcha_id(latcha_key)
         if existing:
             logging.info("Issue already exists: %s - updating", existing)
-            update_dest_issue(existing, summary, description, due_date, latcha_created, data.get("status"), data.get("priority"), data.get("attachments"))
+            update_dest_issue(existing, summary, description, due_date, latcha_created, status, priority, parsed_attachments)
             return jsonify({"status": "updated", "issue": existing}), 200
 
         # Create mirror
-        new_key = create_dest_issue(latcha_key, summary, description, due_date, latcha_created, data.get("priority"))
+        new_key = create_dest_issue(latcha_key, summary, description, due_date, latcha_created, priority, parsed_attachments)
         logging.info("Created mirrored issue %s for source %s", new_key, latcha_key)
 
         # After creation, if a specific status was requested, attempt to transition to it.
-        if data.get("status"):
+        if status:
             issue_key = new_key # for status transition
-            status = data.get("status")
             try:
                 transitions_resp = requests.get(
                     dest_url(f"/rest/api/3/issue/{issue_key}/transitions"),
@@ -406,15 +441,6 @@ def webhook():
                     logging.warning(f"No transition found for status {status} for newly created issue {issue_key}")
             except Exception as e:
                 logging.warning(f"Failed to transition status for newly created issue {issue_key}: {e}")
-
-        # Attachments (fetched directly from source to avoid brittle templating)
-        try:
-            atts = fetch_attachments_from_source(latcha_key)
-            if atts:
-                copy_attachments_to_dest(new_key, atts)
-                logging.info("Copied %d attachments to %s", len(atts), new_key)
-        except Exception as e:
-            logging.warning("Attachments failed for %s: %s", latcha_key, e)
 
         return jsonify({"status": "ok", "new_issue": new_key}), 200
 
