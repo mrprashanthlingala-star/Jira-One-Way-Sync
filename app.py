@@ -70,32 +70,109 @@ def find_existing_issue_by_latcha_id(latcha_key: str):
     except Exception:
         return None
 
-def create_dest_issue(latcha_key, summary, description, due_date, latcha_created):
-    # Build description in Atlassian Document Format (ADF)
-    adf_description = {
+def _make_adf_from_text(plain_text: str):
+    """
+    Convert plain text (possibly many lines) into a single ADF doc.
+    Newlines become hardBreaks so the final rendered text preserves line breaks.
+    """
+    if plain_text is None or plain_text == "":
+        plain_text = "No description provided."
+
+    # Build a single paragraph with hardBreaks between lines.
+    lines = plain_text.splitlines() or [""]
+    content = []
+
+    # First line (may be empty)
+    first = lines[0]
+    if first != "":
+        content.append({"type": "text", "text": first})
+    else:
+        # empty first line -> nothing (ADF allows empty paragraph)
+        pass
+
+    # for each subsequent line add a hardBreak then text node
+    for line in lines[1:]:
+        content.append({"type": "hardBreak"})
+        if line != "":
+            content.append({"type": "text", "text": line})
+
+    # If there was only an empty string, ensure at least an empty text node
+    if not content:
+        content = [{"type": "text", "text": ""}]
+
+    return {
         "type": "doc",
         "version": 1,
         "content": [
-            {
-                "type": "paragraph",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": description or "No description provided."
-                    }
-                ]
-            },
-            {
-                "type": "paragraph",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"---\nOriginal ticket: https://{SRC_SITE}/browse/{latcha_key}"
-                    }
-                ]
-            }
+            {"type": "paragraph", "content": content}
         ]
     }
+
+def normalize_description_to_adf(description_input, latcha_key):
+    """
+    Accepts description_input which may be:
+      - dict (ADF already)
+      - JSON string (ADF JSON)
+      - plain text string (multiline)
+    Returns a valid ADF dict. Always appends an 'Original ticket' paragraph.
+    """
+    try:
+        # Case 1: already a Python dict that looks like ADF
+        if isinstance(description_input, dict):
+            adf = description_input
+            # basic validation: must be a 'doc'
+            if adf.get("type") != "doc":
+                # fallback to wrapping as text
+                logging.debug("Incoming dict description not ADF doc; wrapping as text.")
+                adf = _make_adf_from_text(json.dumps(description_input))
+        elif isinstance(description_input, str):
+            # Try parse JSON string -> maybe it's stringified ADF
+            desc = description_input.strip()
+            parsed = None
+            if desc.startswith("{") or desc.startswith("["):
+                try:
+                    parsed = json.loads(desc)
+                except Exception:
+                    parsed = None
+
+            if isinstance(parsed, dict) and parsed.get("type") == "doc":
+                adf = parsed
+            else:
+                # Not ADF JSON -> treat as plain text (this preserves newlines)
+                adf = _make_adf_from_text(description_input)
+        else:
+            # None or unknown type -> fallback plain message
+            adf = _make_adf_from_text(None)
+    except Exception as ex:
+        logging.exception("normalize_description_to_adf: falling back to plain text due to error: %s", ex)
+        adf = _make_adf_from_text(None)
+
+    # Now append the Original ticket paragraph (always as a separate paragraph)
+    link_para = {
+        "type": "paragraph",
+        "content": [
+            {"type": "text", "text": f"---\nOriginal ticket: https://{SRC_SITE}/browse/{latcha_key}"}
+        ]
+    }
+
+    # If adf already has content (list), append; else create content
+    if not isinstance(adf, dict) or "content" not in adf:
+        adf = {
+            "type": "doc",
+            "version": 1,
+            "content": [link_para]
+        }
+    else:
+        # append link paragraph
+        adf_content = adf.get("content") or []
+        adf_content.append(link_para)
+        adf["content"] = adf_content
+
+    return adf
+
+def create_dest_issue(latcha_key, summary, description, due_date, latcha_created, priority=None, attachments=None):
+    # Normalize description into valid ADF no matter what the incoming format is.
+    adf_description = normalize_description_to_adf(description, latcha_key)
 
     fields = {
         "project": {"key": DEST_PROJECT},
@@ -105,13 +182,17 @@ def create_dest_issue(latcha_key, summary, description, due_date, latcha_created
         "labels": ["LatchaSync"]
     }
 
-    # Add optional fields if present
     if due_date:
         fields["duedate"] = due_date
     if CF_LATCHA_ID:
         fields[CF_LATCHA_ID] = latcha_key
     if CF_LATCHA_CREATED and latcha_created:
-        fields[CF_LATCHA_CREATED] = latcha_created  # must be ISO-8601
+        fields[CF_LATCHA_CREATED] = latcha_created
+    if priority:
+        # keep your existing priority mapping logic if needed
+        pname = get_priority_name(priority)
+        if pname:
+            fields["priority"] = {"name": pname}
 
     r = requests.post(
         dest_url("/rest/api/3/issue"),
@@ -119,9 +200,17 @@ def create_dest_issue(latcha_key, summary, description, due_date, latcha_created
         headers={"Accept": "application/json", "Content-Type": "application/json"},
         json={"fields": fields}, timeout=TIMEOUT
     )
-    if r.status_code not in (200, 201):
-        raise RuntimeError(f"Create issue failed: {r.status_code} {r.text}")
-    return r.json()["key"]
+    r.raise_for_status()
+    new_key = r.json()["key"]
+
+    # Attachments handling (unchanged)
+    if attachments:
+        try:
+            copy_attachments_to_dest(new_key, attachments)
+        except Exception as e:
+            logging.warning("Attachments failed for %s: %s", new_key, e)
+
+    return new_key
 
 def fetch_attachments_from_source(latcha_key):
     """Fetch attachment metadata from clictell."""
