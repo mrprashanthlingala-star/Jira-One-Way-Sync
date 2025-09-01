@@ -72,106 +72,67 @@ def find_existing_issue_by_latcha_id(latcha_key: str):
 
 def _make_adf_from_text(plain_text: str):
     """
-    Convert plain text (possibly many lines) into a single ADF doc.
-    Newlines become hardBreaks so the final rendered text preserves line breaks.
+    Convert plain text (possibly multi-line) into a valid ADF doc.
+    Newlines become hardBreaks.
     """
-    if plain_text is None or plain_text == "":
+    if not plain_text:
         plain_text = "No description provided."
 
-    # Build a single paragraph with hardBreaks between lines.
-    lines = plain_text.splitlines() or [""]
+    lines = plain_text.splitlines()
     content = []
 
-    # First line (may be empty)
-    first = lines[0]
-    if first != "":
-        content.append({"type": "text", "text": first})
-    else:
-        # empty first line -> nothing (ADF allows empty paragraph)
-        pass
-
-    # for each subsequent line add a hardBreak then text node
-    for line in lines[1:]:
-        content.append({"type": "hardBreak"})
-        if line != "":
+    for idx, line in enumerate(lines):
+        if idx > 0:
+            content.append({"type": "hardBreak"})
+        if line:
             content.append({"type": "text", "text": line})
 
-    # If there was only an empty string, ensure at least an empty text node
-    if not content:
+    if not content:  # if everything was empty
         content = [{"type": "text", "text": ""}]
 
     return {
         "type": "doc",
         "version": 1,
-        "content": [
-            {"type": "paragraph", "content": content}
-        ]
+        "content": [{"type": "paragraph", "content": content}]
     }
+
 
 def normalize_description_to_adf(description_input, latcha_key):
     """
-    Accepts description_input which may be:
-      - dict (ADF already)
-      - JSON string (ADF JSON)
-      - plain text string (multiline)
-    Returns a valid ADF dict. Always appends an 'Original ticket' paragraph.
+    Normalizes incoming description (ADF dict, JSON string, or plain text) into valid ADF.
+    Always appends the 'Original ticket' paragraph.
     """
+    adf = None
     try:
-        # Case 1: already a Python dict that looks like ADF
-        if isinstance(description_input, dict):
+        if isinstance(description_input, dict) and description_input.get("type") == "doc":
             adf = description_input
-            # basic validation: must be a 'doc'
-            if adf.get("type") != "doc":
-                # fallback to wrapping as text
-                logging.debug("Incoming dict description not ADF doc; wrapping as text.")
-                adf = _make_adf_from_text(json.dumps(description_input))
         elif isinstance(description_input, str):
-            # Try parse JSON string -> maybe it's stringified ADF
-            desc = description_input.strip()
-            parsed = None
-            if desc.startswith("{") or desc.startswith("["):
-                try:
-                    parsed = json.loads(desc)
-                except Exception:
-                    parsed = None
-
-            if isinstance(parsed, dict) and parsed.get("type") == "doc":
-                adf = parsed
-            else:
-                # Not ADF JSON -> treat as plain text (this preserves newlines)
+            try:
+                parsed = json.loads(description_input)
+                if isinstance(parsed, dict) and parsed.get("type") == "doc":
+                    adf = parsed
+                else:
+                    adf = _make_adf_from_text(description_input)
+            except json.JSONDecodeError:
                 adf = _make_adf_from_text(description_input)
         else:
-            # None or unknown type -> fallback plain message
-            adf = _make_adf_from_text(None)
+            adf = _make_adf_from_text(str(description_input or ""))
     except Exception as ex:
-        logging.exception("normalize_description_to_adf: falling back to plain text due to error: %s", ex)
-        adf = _make_adf_from_text(None)
+        logging.exception("normalize_description_to_adf: fallback to plain text: %s", ex)
+        adf = _make_adf_from_text("No description provided.")
 
-    # Now append the Original ticket paragraph (always as a separate paragraph)
+    # Always append original ticket reference
     link_para = {
         "type": "paragraph",
-        "content": [
-            {"type": "text", "text": f"---\nOriginal ticket: https://{SRC_SITE}/browse/{latcha_key}"}
-        ]
+        "content": [{"type": "text", "text": f"---\nOriginal ticket: https://{SRC_SITE}/browse/{latcha_key}"}]
     }
-
-    # If adf already has content (list), append; else create content
-    if not isinstance(adf, dict) or "content" not in adf:
-        adf = {
-            "type": "doc",
-            "version": 1,
-            "content": [link_para]
-        }
-    else:
-        # append link paragraph
-        adf_content = adf.get("content") or []
-        adf_content.append(link_para)
-        adf["content"] = adf_content
+    adf.setdefault("content", []).append(link_para)
 
     return adf
 
+
 def create_dest_issue(latcha_key, summary, description, due_date, latcha_created, priority=None, attachments=None):
-    # Normalize description into valid ADF no matter what the incoming format is.
+    # Normalize description into ADF
     adf_description = normalize_description_to_adf(description, latcha_key)
 
     fields = {
@@ -189,21 +150,24 @@ def create_dest_issue(latcha_key, summary, description, due_date, latcha_created
     if CF_LATCHA_CREATED and latcha_created:
         fields[CF_LATCHA_CREATED] = latcha_created
     if priority:
-        # keep your existing priority mapping logic if needed
         pname = get_priority_name(priority)
         if pname:
             fields["priority"] = {"name": pname}
+
+    # Debugging: log the JSON before sending
+    logging.debug("Payload to Jira: %s", json.dumps({"fields": fields}, indent=2))
 
     r = requests.post(
         dest_url("/rest/api/3/issue"),
         auth=dest_auth(),
         headers={"Accept": "application/json", "Content-Type": "application/json"},
-        json={"fields": fields}, timeout=TIMEOUT
+        json={"fields": fields},
+        timeout=TIMEOUT
     )
     r.raise_for_status()
     new_key = r.json()["key"]
 
-    # Attachments handling (unchanged)
+    # Handle attachments
     if attachments:
         try:
             copy_attachments_to_dest(new_key, attachments)
