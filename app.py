@@ -137,7 +137,7 @@ def normalize_description_to_adf(description: str):
 
 def create_dest_issue(latcha_key, summary, description, due_date, latcha_created, priority=None, attachments=None):
     # Normalize description into ADF
-    adf_description = normalize_description_to_adf(description: str)
+    adf_description = normalize_description_to_adf(description)
 
     fields = {
         "project": {"key": DEST_PROJECT},
