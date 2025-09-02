@@ -72,30 +72,34 @@ def find_existing_issue_by_latcha_id(latcha_key: str):
 
 def _make_adf_from_text(plain_text: str):
     """
-    Convert plain text (possibly multi-line) into a valid ADF doc.
-    Newlines become hardBreaks.
+    Convert plain text (with newlines) into valid ADF.
+    Each newline becomes a 'hardBreak'.
     """
     if not plain_text:
         plain_text = "No description provided."
 
-    lines = plain_text.splitlines()
+    # Split into lines, preserve line breaks
     content = []
-
-    for idx, line in enumerate(lines):
-        if idx > 0:
+    for idx, line in enumerate(plain_text.splitlines()):
+        if idx > 0:  # insert a line break before new line
             content.append({"type": "hardBreak"})
-        if line:
+        if line:  # non-empty line
             content.append({"type": "text", "text": line})
 
-    if not content:  # if everything was empty
+    if not content:  # handle edge case
         content = [{"type": "text", "text": ""}]
 
     return {
         "type": "doc",
         "version": 1,
-        "content": [{"type": "paragraph", "content": content}]
+        "content": [
+            {
+                "type": "paragraph",
+                "content": content
+            }
+        ]
     }
-
+    
 
 def normalize_description_to_adf(description_input, latcha_key):
     """
