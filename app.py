@@ -99,40 +99,40 @@ def _make_adf_from_text(plain_text: str):
             }
         ]
     }
-    
 
-def normalize_description_to_adf(description_input, latcha_key):
+
+def normalize_description_to_adf(description: str):
     """
-    Normalizes incoming description (ADF dict, JSON string, or plain text) into valid ADF.
-    Always appends the 'Original ticket' paragraph.
+    Convert plain text (with newlines, tabs, etc.) into valid Jira ADF description.
+    Handles multiline safely using paragraphs + hardBreak.
     """
-    adf = None
-    try:
-        if isinstance(description_input, dict) and description_input.get("type") == "doc":
-            adf = description_input
-        elif isinstance(description_input, str):
-            try:
-                parsed = json.loads(description_input)
-                if isinstance(parsed, dict) and parsed.get("type") == "doc":
-                    adf = parsed
-                else:
-                    adf = _make_adf_from_text(description_input)
-            except json.JSONDecodeError:
-                adf = _make_adf_from_text(description_input)
+    if not description or description.strip() == "":
+        description = "No description provided."
+
+    paragraphs = []
+    for block in description.split("\n"):
+        if block.strip() == "":
+            # preserve blank lines as empty paragraphs
+            paragraphs.append({
+                "type": "paragraph",
+                "content": []
+            })
         else:
-            adf = _make_adf_from_text(str(description_input or ""))
-    except Exception as ex:
-        logging.exception("normalize_description_to_adf: fallback to plain text: %s", ex)
-        adf = _make_adf_from_text("No description provided.")
+            paragraphs.append({
+                "type": "paragraph",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": block
+                    }
+                ]
+            })
 
-    # Always append original ticket reference
-    link_para = {
-        "type": "paragraph",
-        "content": [{"type": "text", "text": f"---\nOriginal ticket: https://{SRC_SITE}/browse/{latcha_key}"}]
+    return {
+        "type": "doc",
+        "version": 1,
+        "content": paragraphs
     }
-    adf.setdefault("content", []).append(link_para)
-
-    return adf
 
 
 def create_dest_issue(latcha_key, summary, description, due_date, latcha_created, priority=None, attachments=None):
