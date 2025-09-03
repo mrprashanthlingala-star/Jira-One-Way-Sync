@@ -104,34 +104,33 @@ def _make_adf_from_text(plain_text: str):
 def normalize_description_to_adf(description: str):
     """
     Convert plain text (with newlines, tabs, etc.) into valid Jira ADF description.
-    Handles multiline safely using paragraphs + hardBreak.
+    Uses 'hardBreak' to represent newlines so multi-line descriptions are accepted.
     """
     if not description or description.strip() == "":
         description = "No description provided."
 
-    paragraphs = []
-    for block in description.split("\n"):
-        if block.strip() == "":
-            # preserve blank lines as empty paragraphs
-            paragraphs.append({
-                "type": "paragraph",
-                "content": []
-            })
-        else:
-            paragraphs.append({
-                "type": "paragraph",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": block
-                    }
-                ]
-            })
+    content = []
+    lines = description.split("\n")
+
+    for idx, line in enumerate(lines):
+        if line:
+            content.append({"type": "text", "text": line})
+        if idx < len(lines) - 1:
+            # Add hard break after every line except the last
+            content.append({"type": "hardBreak"})
+
+    if not content:  # edge case
+        content = [{"type": "text", "text": ""}]
 
     return {
         "type": "doc",
         "version": 1,
-        "content": paragraphs
+        "content": [
+            {
+                "type": "paragraph",
+                "content": content
+            }
+        ]
     }
 
 
